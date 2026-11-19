@@ -1,30 +1,52 @@
 # EffortGate
 
-Universal Multi-Provider AI Gateway with Adaptive Effort Sizing & Token Protection.
+OpenAI-compatible AI proxy that sits between your coding tools (Cursor, Continue, Aider) and LLM providers to cut token costs and prevent `429 Too Many Requests`.
 
-EffortGate sits between your coding interfaces (Cursor, Continue.dev, Claude Code, Aider, Neovim) and upstream AI providers (OpenAI, Anthropic Claude, Google Gemini, etc.).
-## Features
-- **Quota Protection:** Actively enforce rolling sliding-window limits for RPM, RPD, and TPM per provider/key to prevent `429 Too Many Requests`.
-- **Adaptive Effort Sizing:** Zero-cost heuristics classify tasks into `FAST`, `NORMAL`, and `AGENT` tiers.
-- **Dynamic Context Budgeting:** Trim massive histories down to focused context blocks based on task effort tier.
-- **Routing:** Unifies calling across multiple providers via `litellm`.
+## How It Works
 
-## Setup
+1. **Quota Limiter:** Tracks RPM, RPD, and TPM with rolling sliding windows (In-Memory or Redis).
+2. **Effort Classifier:** Sub-millisecond heuristics categorize requests into `FAST`, `NORMAL`, or `AGENT`.
+3. **Context Budgeter:** Trims bloated conversation history based on the task tier (e.g. `FAST` tasks are capped at ~2k tokens).
+4. **Universal Router:** Forwards requests to any provider via `litellm`.
 
-1. Copy `.env.example` to `.env` and fill in your API keys.
-2. Run with Docker Compose:
+---
 
+## Developer Quickstart
+
+### 1. Install & Setup
 ```bash
-docker-compose up -d
+git clone https://github.com/soham1228/Effort_Gate.git
+cd Effort_Gate
+pip install -e .[dev]
+cp .env.example .env
 ```
 
-3. Point your AI tooling to `http://localhost:8000/v1` for standard OpenAI drop-in support.
+Set your API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) in `.env`.
 
-## Testing
-
-Install dependencies and run pytest:
-
+### 2. Run the Gateway
 ```bash
-pip install -e .[dev]
+# Via CLI
+effortgate --port 8000 --reload
+
+# Or via Python module
+python -m effortgate.server --port 8000
+```
+
+### 3. Point Your Tools to EffortGate
+Set your tool's OpenAI Base URL to:
+```text
+http://localhost:8000/v1
+```
+
+### 4. Run Tests
+```bash
 pytest
 ```
+
+---
+
+## Prompt Tags (Overrides)
+You can force a tier inside any prompt:
+- `!fast <prompt>`: Forces minimal context (~2k tokens) and localized edits.
+- `!normal <prompt>`: Default single-turn flow.
+- `!agent <prompt>`: Full context and planning mode.
