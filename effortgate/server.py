@@ -1,9 +1,10 @@
 import time
-from fastapi import FastAPI, Request, Response
+import argparse
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from router import route_request
-from limiter import RateLimitExceeded
+from effortgate.router import route_request
+from effortgate.limiter import RateLimitExceeded
 
 app = FastAPI(
     title="EffortGate",
@@ -34,7 +35,6 @@ async def health():
 
 @app.get("/metrics")
 async def metrics():
-    # Example metrics endpoint
     return {
         "status": "ok",
         "description": "Metrics not fully implemented in mock",
@@ -42,12 +42,12 @@ async def metrics():
 
 @app.get("/v1/models")
 async def list_models():
-    # Mocking standard OpenAI models response
+    # Standard OpenAI models response
     return {
         "object": "list",
         "data": [
             {"id": "gpt-4o-mini", "object": "model", "created": int(time.time()), "owned_by": "openai"},
-            {"id": "gpt-4", "object": "model", "created": int(time.time()), "owned_by": "openai"},
+            {"id": "gpt-4o", "object": "model", "created": int(time.time()), "owned_by": "openai"},
             {"id": "claude-3-5-sonnet-20240620", "object": "model", "created": int(time.time()), "owned_by": "anthropic"}
         ]
     }
@@ -64,6 +64,15 @@ async def chat_completions(request: Request):
         media_type="text/event-stream"
     )
 
-if __name__ == "__main__":
+def main():
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    parser = argparse.ArgumentParser(description="EffortGate AI Gateway Server")
+    parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+    args = parser.parse_args()
+    
+    uvicorn.run("effortgate.server:app", host=args.host, port=args.port, reload=args.reload)
+
+if __name__ == "__main__":
+    main()

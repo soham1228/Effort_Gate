@@ -1,8 +1,28 @@
 import time
 import asyncio
+import threading
 from collections import deque
 from typing import Dict, Deque, Optional, Tuple
-from config import settings
+from effortgate.config import settings
+
+class ReentrantAsyncLock:
+    """Thread-safe and event-loop agnostic lock supporting both 'with' and 'async with'."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        
+    def __enter__(self):
+        self._lock.acquire()
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._lock.release()
+        
+    async def __aenter__(self):
+        self._lock.acquire()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._lock.release()
 
 class RateLimitExceeded(Exception):
     def __init__(self, message: str, retry_after: int):
@@ -23,7 +43,7 @@ class InMemoryLimiter(BaseLimiter):
         self.rpm_windows: Dict[str, Deque[Tuple[float, int]]] = {}
         self.rpd_windows: Dict[str, Deque[Tuple[float, int]]] = {}
         self.tpm_windows: Dict[str, Deque[Tuple[float, int]]] = {}
-        self.lock = asyncio.Lock()
+        self.lock = ReentrantAsyncLock()
     
     def _clean_window(self, window: Deque[Tuple[float, int]], current_time: float, window_size: float) -> int:
         """Removes old entries and returns current sum of tokens/requests in the window."""

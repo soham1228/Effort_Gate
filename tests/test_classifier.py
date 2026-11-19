@@ -1,5 +1,5 @@
 import pytest
-from classifier import classify_effort, get_keyword_score, get_path_score
+from effortgate.classifier import classify_effort, get_keyword_score, get_path_score
 
 @pytest.mark.asyncio
 async def test_fast_classification():

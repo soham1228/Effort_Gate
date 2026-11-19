@@ -1,7 +1,7 @@
 import re
 import litellm
 from typing import List, Dict, Any, Tuple
-from config import settings
+from effortgate.config import settings
 
 # Keywords sets
 NARROW_KEYWORDS = {

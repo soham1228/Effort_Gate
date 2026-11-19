@@ -1,13 +1,13 @@
 import pytest
 import time
 import asyncio
-from limiter import InMemoryLimiter, RateLimitExceeded
+from effortgate.limiter import InMemoryLimiter, RateLimitExceeded
 
 @pytest.mark.asyncio
 async def test_in_memory_limiter_rpm():
     limiter = InMemoryLimiter()
     # Mock settings max RPM to 2 for testing
-    from config import settings
+    from effortgate.config import settings
     original_rpm = settings.MAX_RPM
     settings.MAX_RPM = 2
     

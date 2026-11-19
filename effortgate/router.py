@@ -2,12 +2,12 @@ import json
 import logging
 from typing import AsyncGenerator, Dict, Any, List
 import litellm
-from config import settings
-from limiter import limiter
-from classifier import classify_effort
-from budget import trim_messages
-from tokenizer import estimate_prompt_tokens
-from agent_loop import run_agent_loop
+from effortgate.config import settings
+from effortgate.limiter import limiter
+from effortgate.classifier import classify_effort
+from effortgate.budget import trim_messages
+from effortgate.tokenizer import estimate_prompt_tokens
+from effortgate.agent_loop import run_agent_loop
 
 logger = logging.getLogger(__name__)
 

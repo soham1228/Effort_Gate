@@ -1,6 +1,6 @@
 import pytest
 from httpx import AsyncClient
-from server import app
+from effortgate.server import app
 import json
 
 @pytest.mark.asyncio
