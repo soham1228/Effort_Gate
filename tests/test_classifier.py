@@ -42,3 +42,14 @@ async def test_multi_turn_protection():
     # The rule says: return "NORMAL" (force minimum NORMAL)
     # Let's ensure it's not FAST
     assert tier != "FAST"
+
+from unittest.mock import patch, AsyncMock
+
+@pytest.mark.asyncio
+async def test_fallback_micro_model_mocked():
+    with patch("effortgate.classifier.fallback_micro_model", new_callable=AsyncMock) as mock_micro:
+        mock_micro.return_value = "AGENT"
+        messages = [{"role": "user", "content": "can we review this logic"}]
+        tier = await classify_effort(messages)
+        mock_micro.assert_awaited_once()
+        assert tier == "AGENT"

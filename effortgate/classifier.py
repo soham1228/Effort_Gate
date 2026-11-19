@@ -119,6 +119,12 @@ async def classify_effort(messages: List[Dict[str, Any]]) -> str:
     elif score > 0.66:
         tier = "AGENT"
         
+    # Broad Keyword Override: Multiple broad architectural keywords promote task to AGENT
+    prompt_words = set(re.findall(r'\b\w+\b', prompt_lower))
+    broad_count = sum(1 for bk in BROAD_KEYWORDS if bk in prompt_words)
+    if broad_count >= 2:
+        tier = "AGENT"
+        
     # Micro-Model Fallback for ambiguity or missing keywords
     if 0.30 <= score <= 0.40 and s2 == 0.50:
         micro_tier = await fallback_micro_model(last_prompt)
