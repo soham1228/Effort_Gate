@@ -3,7 +3,12 @@ import argparse
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from effortgate.router import route_streaming_request, route_non_streaming_request, route_request
+from effortgate.router import (
+    prepare_request,
+    route_streaming_request,
+    route_non_streaming_request,
+    route_request
+)
 from effortgate.limiter import RateLimitExceeded
 
 app = FastAPI(
@@ -54,25 +59,63 @@ async def list_models():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
+    # 1. Body parsing validation
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON", "type": "invalid_request_error"}})
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}}
+        )
         
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Request body must be a JSON object", "type": "invalid_request_error"}}
+        )
+
+    # 2. Schema validation
+    messages = body.get("messages")
+    if not messages or not isinstance(messages, list):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "'messages' field is required and must be a non-empty list", "type": "invalid_request_error"}}
+        )
+
+    # 3. Extract Authorization / API Key header if provided
+    auth_header = request.headers.get("authorization")
+    api_key = None
+    if auth_header:
+        if auth_header.lower().startswith("bearer "):
+            api_key = auth_header[7:].strip()
+        else:
+            api_key = auth_header.strip()
+    elif "api-key" in request.headers:
+        api_key = request.headers.get("api-key").strip()
+
+    if api_key and "api_key" not in body:
+        body["api_key"] = api_key
+
+    # 4. Pre-flight check & preparation (quota tracking, effort classification, budgeting)
+    # Any RateLimitExceeded raised here is caught by FastAPI exception handler returning HTTP 429
+    # before any streaming headers are dispatched to the client.
+    tier = await prepare_request(body)
+
     is_stream = body.get("stream", False)
     
     if is_stream:
         return StreamingResponse(
-            route_streaming_request(body),
+            route_streaming_request(body, tier=tier),
             media_type="text/event-stream"
         )
     else:
         try:
-            result = await route_non_streaming_request(body)
+            result = await route_non_streaming_request(body, tier=tier)
             return JSONResponse(content=result)
         except Exception as e:
+            status_code = getattr(e, "status_code", 500)
             return JSONResponse(
-                status_code=500,
+                status_code=status_code,
                 content={"error": {"message": str(e), "type": "internal_error"}}
             )
 

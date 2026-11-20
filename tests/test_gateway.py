@@ -87,3 +87,60 @@ async def test_chat_completions_non_streaming_mocked():
         assert data["id"] == "chatcmpl-mock-nonstream"
         assert data["choices"][0]["message"]["content"] == "Hello non-streaming!"
 
+@pytest.mark.asyncio
+async def test_chat_completions_missing_messages_returns_400():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post("/v1/chat/completions", json={
+            "model": "openai/gpt-4o-mini"
+            # messages omitted
+        })
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+@pytest.mark.asyncio
+async def test_chat_completions_rate_limit_returns_429():
+    from effortgate.limiter import RateLimitExceeded
+    transport = ASGITransport(app=app)
+    with patch("effortgate.router.limiter.check_and_record", side_effect=RateLimitExceeded("RPM limit exceeded", retry_after=45)):
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post("/v1/chat/completions", json={
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True  # Even for streaming requests, 429 is returned BEFORE stream starts
+            })
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "45"
+    assert response.json()["error"]["type"] == "rate_limit_exceeded"
+
+@pytest.mark.asyncio
+async def test_chat_completions_bearer_token_passthrough():
+    transport = ASGITransport(app=app)
+    mock_response = {
+        "id": "chatcmpl-mock-auth",
+        "object": "chat.completion",
+        "choices": [{
+            "message": {"role": "assistant", "content": "Auth test"},
+            "finish_reason": "stop",
+            "index": 0
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+    }
+    with patch("effortgate.router.litellm.acompletion", new=AsyncMock(return_value=mock_response)) as mock_call:
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "fix button color"}],
+                    "stream": False
+                },
+                headers={"Authorization": "Bearer sk-test-key-12345"}
+            )
+        assert response.status_code == 200
+        mock_call.assert_awaited_once()
+        _, kwargs = mock_call.call_args
+        assert kwargs.get("api_key") == "sk-test-key-12345"
+
+
+

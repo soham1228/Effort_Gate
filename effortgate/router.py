@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import AsyncGenerator, Dict, Any, List
+from typing import AsyncGenerator, Dict, Any, List, Optional
 import litellm
 from effortgate.config import settings
 from effortgate.limiter import limiter
@@ -15,7 +15,7 @@ async def prepare_request(request_data: Dict[str, Any]) -> str:
     """
     Common preparation:
     1. Estimate tokens.
-    2. Check rate limit quota.
+    2. Check rate limit quota (raises RateLimitExceeded if quota exceeded).
     3. Classify effort tier.
     4. Trim message history context budget.
     """
@@ -40,11 +40,12 @@ async def prepare_request(request_data: Dict[str, Any]) -> str:
     request_data["messages"] = trimmed_messages
     return tier
 
-async def route_streaming_request(request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+async def route_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None) -> AsyncGenerator[str, None]:
     """
     Handles streaming chat completion requests (stream=True).
     """
-    tier = await prepare_request(request_data)
+    if tier is None:
+        tier = await prepare_request(request_data)
     request_data["stream"] = True
 
     if tier in ["FAST", "NORMAL"]:
@@ -57,12 +58,13 @@ async def route_streaming_request(request_data: Dict[str, Any]) -> AsyncGenerato
 # Backward compatibility alias
 route_request = route_streaming_request
 
-async def route_non_streaming_request(request_data: Dict[str, Any]) -> Dict[str, Any]:
+async def route_non_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None) -> Dict[str, Any]:
     """
     Handles standard non-streaming chat completion requests (stream=False).
     Returns standard OpenAI-compatible JSON dict.
     """
-    tier = await prepare_request(request_data)
+    if tier is None:
+        tier = await prepare_request(request_data)
     request_data["stream"] = False
 
     if tier in ["FAST", "NORMAL"]:
