@@ -59,3 +59,31 @@ async def test_chat_completions_endpoint_mocked():
         assert "data: " in content
         assert "Hello from EffortGate!" in content or "Hello from " in content
         assert "data: [DONE]" in content
+
+@pytest.mark.asyncio
+async def test_chat_completions_non_streaming_mocked():
+    transport = ASGITransport(app=app)
+    mock_response = {
+        "id": "chatcmpl-mock-nonstream",
+        "object": "chat.completion",
+        "choices": [{
+            "message": {"role": "assistant", "content": "Hello non-streaming!"},
+            "finish_reason": "stop",
+            "index": 0
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+    }
+    with patch("effortgate.router.litellm.acompletion", new=AsyncMock(return_value=mock_response)):
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post("/v1/chat/completions", json={
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "say hello"}],
+                "stream": False
+            })
+        
+        assert response.status_code == 200
+        assert "application/json" in response.headers["content-type"]
+        data = response.json()
+        assert data["id"] == "chatcmpl-mock-nonstream"
+        assert data["choices"][0]["message"]["content"] == "Hello non-streaming!"
+

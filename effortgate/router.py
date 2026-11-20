@@ -11,14 +11,13 @@ from effortgate.agent_loop import run_agent_loop
 
 logger = logging.getLogger(__name__)
 
-async def route_request(request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+async def prepare_request(request_data: Dict[str, Any]) -> str:
     """
-    Main routing logic.
+    Common preparation:
     1. Estimate tokens.
-    2. Check quota.
-    3. Classify effort.
-    4. Trim budget.
-    5. Route to direct stream or agent loop.
+    2. Check rate limit quota.
+    3. Classify effort tier.
+    4. Trim message history context budget.
     """
     model = request_data.get("model", settings.DEFAULT_MODEL)
     messages = request_data.get("messages", [])
@@ -27,8 +26,6 @@ async def route_request(request_data: Dict[str, Any]) -> AsyncGenerator[str, Non
     estimated_tokens = estimate_prompt_tokens(messages)
     
     # 2. Check quota
-    # Use API key or model as the rate limit key for simplicity. 
-    # In a real setup, this might be a user ID.
     key = "global" 
     await limiter.check_and_record(key, estimated_tokens)
     
@@ -41,29 +38,66 @@ async def route_request(request_data: Dict[str, Any]) -> AsyncGenerator[str, Non
     # Ensure model configuration is passed for litellm
     request_data["model"] = model
     request_data["messages"] = trimmed_messages
-    
-    # Remove unsupported top-level params if any (litellm handles most, but just in case)
-    # We enforce stream=True for our output
+    return tier
+
+async def route_streaming_request(request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+    """
+    Handles streaming chat completion requests (stream=True).
+    """
+    tier = await prepare_request(request_data)
     request_data["stream"] = True
-    
-    # Emit a system message indicating the tier (optional, for visibility)
-    # yield f"data: {json.dumps({'choices': [{'delta': {'content': f'[EffortGate: {tier} tier assigned]\\n'}}]})}\n\n"
 
     if tier in ["FAST", "NORMAL"]:
-        # Direct SSE streaming
         async for chunk in _stream_litellm(request_data):
             yield chunk
     else:
-        # AGENT tier: structured Plan-and-Execute loop
         async for chunk in run_agent_loop(request_data):
             yield chunk
+
+# Backward compatibility alias
+route_request = route_streaming_request
+
+async def route_non_streaming_request(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handles standard non-streaming chat completion requests (stream=False).
+    Returns standard OpenAI-compatible JSON dict.
+    """
+    tier = await prepare_request(request_data)
+    request_data["stream"] = False
+
+    if tier in ["FAST", "NORMAL"]:
+        response = await litellm.acompletion(**request_data)
+        if hasattr(response, "model_dump"):
+            return response.model_dump(exclude_unset=True)
+        return dict(response)
+    else:
+        # AGENT mode non-streaming: inject planning instruction and call acompletion
+        messages = request_data.get("messages", [])
+        planning_instruction = (
+            "You are in AGENT mode. Follow this structured process:\n"
+            "1. Create a brief 3-step plan.\n"
+            "2. Execute the steps logically.\n"
+            "3. Provide a unified summary with code diffs.\n"
+        )
+        inserted = False
+        for msg in messages:
+            if msg.get("role") == "system":
+                msg["content"] = str(msg["content"]) + "\n\n" + planning_instruction
+                inserted = True
+                break
+        if not inserted:
+            messages.insert(0, {"role": "system", "content": planning_instruction})
+        request_data["messages"] = messages
+        
+        response = await litellm.acompletion(**request_data)
+        if hasattr(response, "model_dump"):
+            return response.model_dump(exclude_unset=True)
+        return dict(response)
 
 async def _stream_litellm(request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
     try:
         response = await litellm.acompletion(**request_data)
         async for chunk in response:
-            # chunk is a ModelResponse object, we can dump its dict
-            # or directly format as OpenAI SSE
             data = chunk.model_dump(exclude_unset=True)
             yield f"data: {json.dumps(data)}\n\n"
         yield "data: [DONE]\n\n"

@@ -3,7 +3,7 @@ import argparse
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from effortgate.router import route_request
+from effortgate.router import route_streaming_request, route_non_streaming_request, route_request
 from effortgate.limiter import RateLimitExceeded
 
 app = FastAPI(
@@ -57,12 +57,24 @@ async def chat_completions(request: Request):
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON"}})
+        return JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON", "type": "invalid_request_error"}})
         
-    return StreamingResponse(
-        route_request(body),
-        media_type="text/event-stream"
-    )
+    is_stream = body.get("stream", False)
+    
+    if is_stream:
+        return StreamingResponse(
+            route_streaming_request(body),
+            media_type="text/event-stream"
+        )
+    else:
+        try:
+            result = await route_non_streaming_request(body)
+            return JSONResponse(content=result)
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": {"message": str(e), "type": "internal_error"}}
+            )
 
 def main():
     import uvicorn
