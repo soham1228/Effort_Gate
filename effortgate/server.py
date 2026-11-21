@@ -96,27 +96,32 @@ async def chat_completions(request: Request):
     if api_key and "api_key" not in body:
         body["api_key"] = api_key
 
-    # 4. Pre-flight check & preparation (quota tracking, effort classification, budgeting)
+    # 4. Pre-flight check & preparation (quota tracking, effort classification, model routing, budgeting)
     # Any RateLimitExceeded raised here is caught by FastAPI exception handler returning HTTP 429
-    # before any streaming headers are dispatched to the client.
-    tier = await prepare_request(body)
+    tier, routed_model = await prepare_request(body)
+    response_headers = {
+        "X-EffortGate-Tier": tier,
+        "X-EffortGate-Routed-Model": routed_model
+    }
 
     is_stream = body.get("stream", False)
     
     if is_stream:
         return StreamingResponse(
             route_streaming_request(body, tier=tier),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers=response_headers
         )
     else:
         try:
             result = await route_non_streaming_request(body, tier=tier)
-            return JSONResponse(content=result)
+            return JSONResponse(content=result, headers=response_headers)
         except Exception as e:
             status_code = getattr(e, "status_code", 500)
             return JSONResponse(
                 status_code=status_code,
-                content={"error": {"message": str(e), "type": "internal_error"}}
+                content={"error": {"message": str(e), "type": "internal_error"}},
+                headers=response_headers
             )
 
 def main():

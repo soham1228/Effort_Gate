@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import AsyncGenerator, Dict, Any, List, Optional
+from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple
 import litellm
 from effortgate.config import settings
 from effortgate.limiter import limiter
@@ -11,15 +11,16 @@ from effortgate.agent_loop import run_agent_loop
 
 logger = logging.getLogger(__name__)
 
-async def prepare_request(request_data: Dict[str, Any]) -> str:
+async def prepare_request(request_data: Dict[str, Any]) -> Tuple[str, str]:
     """
     Common preparation:
     1. Estimate tokens.
     2. Check rate limit quota (raises RateLimitExceeded if quota exceeded).
     3. Classify effort tier.
-    4. Trim message history context budget.
+    4. Resolve routed model based on tier.
+    5. Trim message history context budget.
     """
-    model = request_data.get("model", settings.DEFAULT_MODEL)
+    requested_model = request_data.get("model", settings.DEFAULT_MODEL)
     messages = request_data.get("messages", [])
     
     # 1. Estimate tokens
@@ -31,21 +32,24 @@ async def prepare_request(request_data: Dict[str, Any]) -> str:
     
     # 3. Classify effort
     tier = await classify_effort(messages)
+
+    # 4. Resolve routed model based on tier
+    routed_model = settings.get_model_for_tier(tier, requested_model)
     
-    # 4. Trim budget
+    # 5. Trim budget
     trimmed_messages = trim_messages(messages, tier)
     
     # Ensure model configuration is passed for litellm
-    request_data["model"] = model
+    request_data["model"] = routed_model
     request_data["messages"] = trimmed_messages
-    return tier
+    return tier, routed_model
 
 async def route_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None) -> AsyncGenerator[str, None]:
     """
     Handles streaming chat completion requests (stream=True).
     """
     if tier is None:
-        tier = await prepare_request(request_data)
+        tier, _ = await prepare_request(request_data)
     request_data["stream"] = True
 
     if tier in ["FAST", "NORMAL"]:
@@ -64,7 +68,7 @@ async def route_non_streaming_request(request_data: Dict[str, Any], tier: Option
     Returns standard OpenAI-compatible JSON dict.
     """
     if tier is None:
-        tier = await prepare_request(request_data)
+        tier, _ = await prepare_request(request_data)
     request_data["stream"] = False
 
     if tier in ["FAST", "NORMAL"]:
