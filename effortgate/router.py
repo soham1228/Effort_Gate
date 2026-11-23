@@ -11,13 +11,13 @@ from effortgate.agent_loop import run_agent_loop
 
 logger = logging.getLogger(__name__)
 
-async def prepare_request(request_data: Dict[str, Any]) -> Tuple[str, str]:
+async def prepare_request(request_data: Dict[str, Any], lock_model: bool = False) -> Tuple[str, str]:
     """
     Common preparation:
     1. Estimate tokens.
     2. Check rate limit quota (raises RateLimitExceeded if quota exceeded).
     3. Classify effort tier.
-    4. Resolve routed model based on tier.
+    4. Resolve routed model based on tier (or lock if requested).
     5. Trim message history context budget.
     """
     requested_model = request_data.get("model", settings.DEFAULT_MODEL)
@@ -33,8 +33,11 @@ async def prepare_request(request_data: Dict[str, Any]) -> Tuple[str, str]:
     # 3. Classify effort
     tier = await classify_effort(messages)
 
-    # 4. Resolve routed model based on tier
-    routed_model = settings.get_model_for_tier(tier, requested_model)
+    # 4. Resolve routed model based on tier (respecting lock flag)
+    if lock_model or not settings.AUTO_ROUTING:
+        routed_model = requested_model
+    else:
+        routed_model = settings.get_model_for_tier(tier, requested_model)
     
     # 5. Trim budget
     trimmed_messages = trim_messages(messages, tier)
@@ -44,12 +47,12 @@ async def prepare_request(request_data: Dict[str, Any]) -> Tuple[str, str]:
     request_data["messages"] = trimmed_messages
     return tier, routed_model
 
-async def route_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None) -> AsyncGenerator[str, None]:
+async def route_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None, lock_model: bool = False) -> AsyncGenerator[str, None]:
     """
     Handles streaming chat completion requests (stream=True).
     """
     if tier is None:
-        tier, _ = await prepare_request(request_data)
+        tier, _ = await prepare_request(request_data, lock_model=lock_model)
     request_data["stream"] = True
 
     if tier in ["FAST", "NORMAL"]:
@@ -62,13 +65,13 @@ async def route_streaming_request(request_data: Dict[str, Any], tier: Optional[s
 # Backward compatibility alias
 route_request = route_streaming_request
 
-async def route_non_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None) -> Dict[str, Any]:
+async def route_non_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None, lock_model: bool = False) -> Dict[str, Any]:
     """
     Handles standard non-streaming chat completion requests (stream=False).
     Returns standard OpenAI-compatible JSON dict.
     """
     if tier is None:
-        tier, _ = await prepare_request(request_data)
+        tier, _ = await prepare_request(request_data, lock_model=lock_model)
     request_data["stream"] = False
 
     if tier in ["FAST", "NORMAL"]:

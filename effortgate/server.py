@@ -96,25 +96,37 @@ async def chat_completions(request: Request):
     if api_key and "api_key" not in body:
         body["api_key"] = api_key
 
-    # 4. Pre-flight check & preparation (quota tracking, effort classification, model routing, budgeting)
+    # 4. Check for client model lock override flags
+    # Supported: Header 'X-EffortGate-Lock-Model: true' or 'X-EffortGate-Auto-Route: false'
+    # Or in JSON body: 'lock_model: true' or 'auto_route: false'
+    lock_model = False
+    lock_header = request.headers.get("x-effortgate-lock-model", "").lower()
+    auto_route_header = request.headers.get("x-effortgate-auto-route", "").lower()
+    if lock_header in ("true", "1") or auto_route_header in ("false", "0"):
+        lock_model = True
+    elif body.get("lock_model") is True or body.get("auto_route") is False:
+        lock_model = True
+
+    # 5. Pre-flight check & preparation (quota tracking, effort classification, model routing, budgeting)
     # Any RateLimitExceeded raised here is caught by FastAPI exception handler returning HTTP 429
-    tier, routed_model = await prepare_request(body)
+    tier, routed_model = await prepare_request(body, lock_model=lock_model)
     response_headers = {
         "X-EffortGate-Tier": tier,
-        "X-EffortGate-Routed-Model": routed_model
+        "X-EffortGate-Routed-Model": routed_model,
+        "X-EffortGate-Model-Locked": str(lock_model).lower()
     }
 
     is_stream = body.get("stream", False)
     
     if is_stream:
         return StreamingResponse(
-            route_streaming_request(body, tier=tier),
+            route_streaming_request(body, tier=tier, lock_model=lock_model),
             media_type="text/event-stream",
             headers=response_headers
         )
     else:
         try:
-            result = await route_non_streaming_request(body, tier=tier)
+            result = await route_non_streaming_request(body, tier=tier, lock_model=lock_model)
             return JSONResponse(content=result, headers=response_headers)
         except Exception as e:
             status_code = getattr(e, "status_code", 500)
