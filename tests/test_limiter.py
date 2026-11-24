@@ -39,3 +39,36 @@ async def test_in_memory_limiter_window_cleanup():
     
     async with limiter.lock:
         assert len(limiter.rpm_windows[key]) == 2 # Only the two recent ones should be there
+
+@pytest.mark.asyncio
+async def test_in_memory_limiter_isolated_keys():
+    limiter = InMemoryLimiter()
+    from effortgate.config import settings
+    original_rpm = settings.MAX_RPM
+    settings.MAX_RPM = 1
+    
+    try:
+        # User A makes 1 request -> OK
+        await limiter.check_and_record("user_a", 50)
+        
+        # User A makes 2nd request -> Exceeds RPM
+        with pytest.raises(RateLimitExceeded):
+            await limiter.check_and_record("user_a", 50)
+            
+        # User B makes a request -> Must SUCCEED because quotas are isolated per key!
+        await limiter.check_and_record("user_b", 50)
+    finally:
+        settings.MAX_RPM = original_rpm
+
+def test_resolve_rate_limit_key():
+    from effortgate.router import resolve_rate_limit_key
+    # Explicit key
+    assert resolve_rate_limit_key({}, rate_limit_key="custom_key") == "custom_key"
+    # From body
+    assert resolve_rate_limit_key({"rate_limit_key": "body_key"}) == "body_key"
+    # Hashed API key
+    key = resolve_rate_limit_key({"api_key": "sk-secret-12345"})
+    assert key.startswith("key:") and len(key) == 20
+    # Fallback to global
+    assert resolve_rate_limit_key({}) == "global"
+

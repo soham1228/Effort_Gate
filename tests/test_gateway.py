@@ -142,5 +142,86 @@ async def test_chat_completions_bearer_token_passthrough():
         _, kwargs = mock_call.call_args
         assert kwargs.get("api_key") == "sk-test-key-12345"
 
+@pytest.mark.asyncio
+async def test_chat_completions_auto_routing_fast():
+    transport = ASGITransport(app=app)
+    mock_response = {
+        "id": "chatcmpl-mock-fast",
+        "object": "chat.completion",
+        "choices": [{"message": {"role": "assistant", "content": "Fast edit"}, "index": 0}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+    }
+    with patch("effortgate.router.litellm.acompletion", new=AsyncMock(return_value=mock_response)) as mock_call:
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "expensive-unnecessary-model",
+                    "messages": [{"role": "user", "content": "fix button color in modal"}],
+                    "stream": False
+                }
+            )
+        assert response.status_code == 200
+        assert response.headers["x-effortgate-tier"] == "FAST"
+        assert response.headers["x-effortgate-routed-model"] == "openai/gpt-4o-mini"
+        assert response.headers["x-effortgate-model-locked"] == "false"
+        _, kwargs = mock_call.call_args
+        assert kwargs.get("model") == "openai/gpt-4o-mini"
+
+@pytest.mark.asyncio
+async def test_chat_completions_auto_routing_agent():
+    transport = ASGITransport(app=app)
+    mock_response = {
+        "id": "chatcmpl-mock-agent",
+        "object": "chat.completion",
+        "choices": [{"message": {"role": "assistant", "content": "Agent plan"}, "index": 0}],
+        "usage": {"prompt_tokens": 15, "completion_tokens": 15, "total_tokens": 30}
+    }
+    with patch("effortgate.router.litellm.acompletion", new=AsyncMock(return_value=mock_response)) as mock_call:
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "refactor database migration across entire pipeline"}],
+                    "stream": False
+                }
+            )
+        assert response.status_code == 200
+        assert response.headers["x-effortgate-tier"] == "AGENT"
+        assert response.headers["x-effortgate-routed-model"] == "anthropic/claude-3-5-sonnet"
+        assert response.headers["x-effortgate-model-locked"] == "false"
+        _, kwargs = mock_call.call_args
+        assert kwargs.get("model") == "anthropic/claude-3-5-sonnet"
+
+@pytest.mark.asyncio
+async def test_chat_completions_model_lock_override():
+    transport = ASGITransport(app=app)
+    mock_response = {
+        "id": "chatcmpl-mock-locked",
+        "object": "chat.completion",
+        "choices": [{"message": {"role": "assistant", "content": "Locked model response"}, "index": 0}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
+    }
+    with patch("effortgate.router.litellm.acompletion", new=AsyncMock(return_value=mock_response)) as mock_call:
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "openai/gpt-4o",
+                    "messages": [{"role": "user", "content": "fix button color in modal"}],
+                    "stream": False
+                },
+                headers={"X-EffortGate-Lock-Model": "true"}
+            )
+        assert response.status_code == 200
+        assert response.headers["x-effortgate-tier"] == "FAST"
+        # User locked the model, so it must stay gpt-4o instead of being downscaled to gpt-4o-mini!
+        assert response.headers["x-effortgate-routed-model"] == "openai/gpt-4o"
+        assert response.headers["x-effortgate-model-locked"] == "true"
+        _, kwargs = mock_call.call_args
+        assert kwargs.get("model") == "openai/gpt-4o"
+
+
 
 

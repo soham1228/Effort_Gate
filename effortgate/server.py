@@ -1,5 +1,6 @@
 import time
 import argparse
+import hashlib
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -107,9 +108,21 @@ async def chat_completions(request: Request):
     elif body.get("lock_model") is True or body.get("auto_route") is False:
         lock_model = True
 
-    # 5. Pre-flight check & preparation (quota tracking, effort classification, model routing, budgeting)
+    # 5. Determine Rate Limit Key for isolated per-user/per-key quota tracking
+    user_header = request.headers.get("x-user-id") or request.headers.get("x-consumer-id")
+    if user_header:
+        rate_limit_key = f"user:{user_header.strip()}"
+    elif api_key:
+        key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+        rate_limit_key = f"key:{key_hash}"
+    elif request.client and request.client.host:
+        rate_limit_key = f"ip:{request.client.host}"
+    else:
+        rate_limit_key = "global"
+
+    # 6. Pre-flight check & preparation (quota tracking, effort classification, model routing, budgeting)
     # Any RateLimitExceeded raised here is caught by FastAPI exception handler returning HTTP 429
-    tier, routed_model = await prepare_request(body, lock_model=lock_model)
+    tier, routed_model = await prepare_request(body, lock_model=lock_model, rate_limit_key=rate_limit_key)
     response_headers = {
         "X-EffortGate-Tier": tier,
         "X-EffortGate-Routed-Model": routed_model,
@@ -120,13 +133,13 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            route_streaming_request(body, tier=tier, lock_model=lock_model),
+            route_streaming_request(body, tier=tier, lock_model=lock_model, rate_limit_key=rate_limit_key),
             media_type="text/event-stream",
             headers=response_headers
         )
     else:
         try:
-            result = await route_non_streaming_request(body, tier=tier, lock_model=lock_model)
+            result = await route_non_streaming_request(body, tier=tier, lock_model=lock_model, rate_limit_key=rate_limit_key)
             return JSONResponse(content=result, headers=response_headers)
         except Exception as e:
             status_code = getattr(e, "status_code", 500)

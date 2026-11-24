@@ -1,5 +1,6 @@
 import json
 import logging
+import hashlib
 from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple
 import litellm
 from effortgate.config import settings
@@ -11,11 +12,33 @@ from effortgate.agent_loop import run_agent_loop
 
 logger = logging.getLogger(__name__)
 
-async def prepare_request(request_data: Dict[str, Any], lock_model: bool = False) -> Tuple[str, str]:
+def resolve_rate_limit_key(request_data: Dict[str, Any], rate_limit_key: Optional[str] = None) -> str:
+    """
+    Derives an isolated quota key:
+    1. Explicit rate_limit_key if provided
+    2. request_data['rate_limit_key'] if set
+    3. SHA-256 hash prefix of client api_key (never stores raw secrets in rate limiter)
+    4. Fallback to 'global'
+    """
+    if rate_limit_key:
+        return rate_limit_key
+    if request_data.get("rate_limit_key"):
+        return str(request_data["rate_limit_key"])
+    api_key = request_data.get("api_key")
+    if api_key:
+        key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+        return f"key:{key_hash}"
+    return "global"
+
+async def prepare_request(
+    request_data: Dict[str, Any],
+    lock_model: bool = False,
+    rate_limit_key: Optional[str] = None
+) -> Tuple[str, str]:
     """
     Common preparation:
     1. Estimate tokens.
-    2. Check rate limit quota (raises RateLimitExceeded if quota exceeded).
+    2. Check rate limit quota per user/key (raises RateLimitExceeded if quota exceeded).
     3. Classify effort tier.
     4. Resolve routed model based on tier (or lock if requested).
     5. Trim message history context budget.
@@ -26,9 +49,9 @@ async def prepare_request(request_data: Dict[str, Any], lock_model: bool = False
     # 1. Estimate tokens
     estimated_tokens = estimate_prompt_tokens(messages)
     
-    # 2. Check quota
-    key = "global" 
-    await limiter.check_and_record(key, estimated_tokens)
+    # 2. Check quota with isolated key
+    quota_key = resolve_rate_limit_key(request_data, rate_limit_key)
+    await limiter.check_and_record(quota_key, estimated_tokens)
     
     # 3. Classify effort
     tier = await classify_effort(messages)
@@ -47,12 +70,17 @@ async def prepare_request(request_data: Dict[str, Any], lock_model: bool = False
     request_data["messages"] = trimmed_messages
     return tier, routed_model
 
-async def route_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None, lock_model: bool = False) -> AsyncGenerator[str, None]:
+async def route_streaming_request(
+    request_data: Dict[str, Any],
+    tier: Optional[str] = None,
+    lock_model: bool = False,
+    rate_limit_key: Optional[str] = None
+) -> AsyncGenerator[str, None]:
     """
     Handles streaming chat completion requests (stream=True).
     """
     if tier is None:
-        tier, _ = await prepare_request(request_data, lock_model=lock_model)
+        tier, _ = await prepare_request(request_data, lock_model=lock_model, rate_limit_key=rate_limit_key)
     request_data["stream"] = True
 
     if tier in ["FAST", "NORMAL"]:
@@ -65,13 +93,18 @@ async def route_streaming_request(request_data: Dict[str, Any], tier: Optional[s
 # Backward compatibility alias
 route_request = route_streaming_request
 
-async def route_non_streaming_request(request_data: Dict[str, Any], tier: Optional[str] = None, lock_model: bool = False) -> Dict[str, Any]:
+async def route_non_streaming_request(
+    request_data: Dict[str, Any],
+    tier: Optional[str] = None,
+    lock_model: bool = False,
+    rate_limit_key: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Handles standard non-streaming chat completion requests (stream=False).
     Returns standard OpenAI-compatible JSON dict.
     """
     if tier is None:
-        tier, _ = await prepare_request(request_data, lock_model=lock_model)
+        tier, _ = await prepare_request(request_data, lock_model=lock_model, rate_limit_key=rate_limit_key)
     request_data["stream"] = False
 
     if tier in ["FAST", "NORMAL"]:
