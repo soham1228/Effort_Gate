@@ -43,6 +43,7 @@ class InMemoryLimiter(BaseLimiter):
         self.rpm_windows: Dict[str, Deque[Tuple[float, int]]] = {}
         self.rpd_windows: Dict[str, Deque[Tuple[float, int]]] = {}
         self.tpm_windows: Dict[str, Deque[Tuple[float, int]]] = {}
+        self.cooldowns: Dict[str, float] = {}
         self.lock = ReentrantAsyncLock()
     
     def _clean_window(self, window: Deque[Tuple[float, int]], current_time: float, window_size: float) -> int:
@@ -66,6 +67,15 @@ class InMemoryLimiter(BaseLimiter):
         now = time.time()
         
         async with self.lock:
+            # Check if this key is currently in an upstream cooldown period
+            if key in self.cooldowns:
+                cooldown_until = self.cooldowns[key]
+                if now < cooldown_until:
+                    retry_after = max(1, int(cooldown_until - now))
+                    raise RateLimitExceeded(f"Upstream provider cooldown active for key '{key}'.", retry_after)
+                else:
+                    del self.cooldowns[key]
+
             if key not in self.rpm_windows:
                 self.rpm_windows[key] = deque()
                 self.rpd_windows[key] = deque()
@@ -96,6 +106,50 @@ class InMemoryLimiter(BaseLimiter):
             if estimated_tokens > 0:
                 self.tpm_windows[key].append((now, estimated_tokens))
 
+    async def sync_headers(self, key: str, headers: Dict[str, str]) -> None:
+        """
+        Parses provider rate limit headers and updates limits/cooldowns.
+        Supported headers:
+        - retry-after
+        - x-ratelimit-remaining-requests / ratelimit-remaining-requests
+        - x-ratelimit-reset-requests / ratelimit-reset-requests
+        """
+        if not headers or not isinstance(headers, dict):
+            return
+            
+        lower_headers = {str(k).lower(): str(v) for k, v in headers.items()}
+        now = time.time()
+        
+        # 1. Direct Retry-After header
+        retry_after = None
+        if "retry-after" in lower_headers:
+            try:
+                retry_after = float(lower_headers["retry-after"])
+            except (ValueError, TypeError):
+                pass
+                
+        # 2. Check remaining requests
+        remaining_requests = lower_headers.get("x-ratelimit-remaining-requests") or lower_headers.get("ratelimit-remaining-requests")
+        if remaining_requests is not None:
+            try:
+                rem_val = int(remaining_requests)
+                if rem_val == 0:
+                    if retry_after is None:
+                        reset_header = lower_headers.get("x-ratelimit-reset-requests") or lower_headers.get("ratelimit-reset-requests")
+                        if reset_header:
+                            try:
+                                retry_after = float(reset_header)
+                            except (ValueError, TypeError):
+                                retry_after = 60.0
+                        else:
+                            retry_after = 60.0
+            except (ValueError, TypeError):
+                pass
+
+        if retry_after is not None and retry_after > 0:
+            async with self.lock:
+                self.cooldowns[key] = now + retry_after
+
 class RedisLimiter(BaseLimiter):
     def __init__(self, redis_url: str):
         import redis.asyncio as redis
@@ -103,6 +157,12 @@ class RedisLimiter(BaseLimiter):
         
     async def check_and_record(self, key: str, estimated_tokens: int = 0) -> None:
         now = time.time()
+
+        # Check upstream cooldown in Redis
+        cooldown_ttl = await self.redis.ttl(f"rate:cooldown:{key}")
+        if cooldown_ttl > 0:
+            raise RateLimitExceeded(f"Upstream provider cooldown active for key '{key}'.", cooldown_ttl)
+
         pipeline = self.redis.pipeline()
         
         rpm_key = f"rate:rpm:{key}"
@@ -117,14 +177,6 @@ class RedisLimiter(BaseLimiter):
         # Count current
         pipeline.zcard(rpm_key)
         pipeline.zcard(rpd_key)
-        # For TPM, we need the sum of scores or values, but zcard just counts elements. 
-        # A better approach for Redis TPM is storing token counts in the member or scoring.
-        # However, to keep it simple and accurate, we can store random UUID as member and token count as score? No, ZSET scores are used for time.
-        # Standard approach for TPM in Redis sliding window:
-        # Member: {timestamp}-{uuid}
-        # Score: timestamp
-        # Value doesn't easily sum without a LUA script.
-        # Let's execute a Lua script for TPM, or simply fetch all elements and sum them up (ok for small windows).
         pipeline.zrange(tpm_key, 0, -1)
         
         results = await pipeline.execute()
@@ -135,7 +187,6 @@ class RedisLimiter(BaseLimiter):
         current_tpm = 0
         for member in tpm_members:
             try:
-                # Format: timestamp:tokens:uuid
                 parts = member.split(':')
                 if len(parts) >= 2:
                     current_tpm += int(parts[1])
@@ -143,7 +194,6 @@ class RedisLimiter(BaseLimiter):
                 pass
                 
         if current_rpm + 1 > settings.MAX_RPM:
-            # Need to get oldest to calculate retry
             oldest_res = await self.redis.zrange(rpm_key, 0, 0, withscores=True)
             retry_after = 60
             if oldest_res:
@@ -179,6 +229,31 @@ class RedisLimiter(BaseLimiter):
             pipeline.expire(tpm_key, 60)
             
         await pipeline.execute()
+
+    async def sync_headers(self, key: str, headers: Dict[str, str]) -> None:
+        if not headers or not isinstance(headers, dict):
+            return
+            
+        lower_headers = {str(k).lower(): str(v) for k, v in headers.items()}
+        retry_after = None
+        if "retry-after" in lower_headers:
+            try:
+                retry_after = float(lower_headers["retry-after"])
+            except (ValueError, TypeError):
+                pass
+                
+        remaining_requests = lower_headers.get("x-ratelimit-remaining-requests") or lower_headers.get("ratelimit-remaining-requests")
+        if remaining_requests is not None:
+            try:
+                if int(remaining_requests) == 0:
+                    if retry_after is None:
+                        reset_header = lower_headers.get("x-ratelimit-reset-requests") or lower_headers.get("ratelimit-reset-requests")
+                        retry_after = float(reset_header) if reset_header else 60.0
+            except (ValueError, TypeError):
+                pass
+
+        if retry_after is not None and retry_after > 0:
+            await self.redis.set(f"rate:cooldown:{key}", "1", ex=max(1, int(retry_after)))
 
 def get_limiter() -> BaseLimiter:
     if settings.REDIS_URL:

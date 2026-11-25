@@ -72,3 +72,35 @@ def test_resolve_rate_limit_key():
     # Fallback to global
     assert resolve_rate_limit_key({}) == "global"
 
+@pytest.mark.asyncio
+async def test_sync_headers_retry_after():
+    limiter = InMemoryLimiter()
+    key = "upstream_test_key"
+    
+    # Simulate receiving a 429 or high load Retry-After header from upstream
+    await limiter.sync_headers(key, {"retry-after": "15"})
+    
+    with pytest.raises(RateLimitExceeded) as exc:
+        await limiter.check_and_record(key, 10)
+    
+    assert exc.value.retry_after >= 14
+    assert "cooldown active" in exc.value.message
+
+@pytest.mark.asyncio
+async def test_sync_headers_remaining_requests_zero():
+    limiter = InMemoryLimiter()
+    key = "upstream_depleted_key"
+    
+    # Simulate upstream indicating 0 remaining requests with reset in 25 seconds
+    await limiter.sync_headers(key, {
+        "x-ratelimit-remaining-requests": "0",
+        "x-ratelimit-reset-requests": "25"
+    })
+    
+    with pytest.raises(RateLimitExceeded) as exc:
+        await limiter.check_and_record(key, 10)
+        
+    assert exc.value.retry_after >= 24
+    assert "cooldown active" in exc.value.message
+
+
