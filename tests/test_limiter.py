@@ -103,4 +103,64 @@ async def test_sync_headers_remaining_requests_zero():
     assert exc.value.retry_after >= 24
     assert "cooldown active" in exc.value.message
 
+@pytest.mark.asyncio
+async def test_in_memory_limiter_boundary_zero_rpm():
+    limiter = InMemoryLimiter()
+    from effortgate.config import settings
+    original_rpm = settings.MAX_RPM
+    settings.MAX_RPM = 0  # Zero limit edge case
+    
+    try:
+        # First request on empty deque must raise RateLimitExceeded without IndexError
+        with pytest.raises(RateLimitExceeded) as exc:
+            await limiter.check_and_record("zero_rpm_key", 10)
+        assert exc.value.retry_after >= 1
+    finally:
+        settings.MAX_RPM = original_rpm
+
+@pytest.mark.asyncio
+async def test_in_memory_limiter_boundary_tpm_exceeded_on_empty_window():
+    limiter = InMemoryLimiter()
+    from effortgate.config import settings
+    original_tpm = settings.MAX_TPM
+    settings.MAX_TPM = 50
+    
+    try:
+        # First request exceeding TPM on empty window must raise RateLimitExceeded without IndexError
+        with pytest.raises(RateLimitExceeded) as exc:
+            await limiter.check_and_record("tpm_key", 100)
+        assert exc.value.retry_after >= 1
+    finally:
+        settings.MAX_TPM = original_tpm
+
+@pytest.mark.asyncio
+async def test_redis_limiter_fallback_on_connection_error():
+    from unittest.mock import AsyncMock
+    from effortgate.limiter import RedisLimiter
+    
+    limiter = RedisLimiter("redis://localhost:6379/0")
+    # Simulate Redis connection failure
+    limiter.redis.ttl = AsyncMock(side_effect=ConnectionError("Redis connection refused"))
+    
+    # Should not raise ConnectionError; should fallback to InMemoryLimiter
+    await limiter.check_and_record("fallback_client", 100)
+    
+    # Verify fallback has recorded the window
+    assert len(limiter.fallback.rpm_windows["fallback_client"]) == 1
+
+@pytest.mark.asyncio
+async def test_redis_limiter_fallback_sync_headers():
+    from unittest.mock import AsyncMock
+    from effortgate.limiter import RedisLimiter
+    
+    limiter = RedisLimiter("redis://localhost:6379/0")
+    # Simulate Redis failure on set
+    limiter.redis.set = AsyncMock(side_effect=ConnectionError("Redis set failed"))
+    
+    # Should fallback to InMemoryLimiter sync_headers
+    await limiter.sync_headers("fallback_key", {"retry-after": "20"})
+    
+    assert "fallback_key" in limiter.fallback.cooldowns
+
+
 
